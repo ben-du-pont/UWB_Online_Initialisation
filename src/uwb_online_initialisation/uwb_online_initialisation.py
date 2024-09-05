@@ -112,7 +112,7 @@ class UwbOnlineInitialisation:
             'non_linear_optimisation_type': "EM", # Type of non linear optimisation to use, either IRLS or LM or KRR (does not work) or MM_Gaussian_Mixture
 
             # Stopping criterion parameters
-            "stopping_criteria": None,
+            "stopping_criteria": ["nb_measurements"],
 
             # Absolute thresholds
             'FIM_thresh': 1e5,
@@ -121,7 +121,7 @@ class UwbOnlineInitialisation:
             'condition_number_thresh': 5e5,
             'covariance_thresh': 10,
             'verification_vector_thresh': 10,
-            'number_of_measurements_thresh': 50,
+            'number_of_measurements_thresh': 150,
 
             # Relative thresholds
             'FIM_ratio_thresh': 1,

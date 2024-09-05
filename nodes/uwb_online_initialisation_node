@@ -29,9 +29,11 @@ class UWBAnchorInitialisationNode:
         
 
     def range_callback(self, msg):
+        
         data = msg.data.split(',')
         range_measurement = float(data[0])
         anchor_id = data[1]
+
 
         if self.current_position is None:
             rospy.logwarn("Drone position not received yet. Ignoring range measurement.")
