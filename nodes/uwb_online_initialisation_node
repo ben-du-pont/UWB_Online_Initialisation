@@ -30,9 +30,11 @@ class UWBAnchorInitialisationNode:
         range_measurement = float(data[0])
         anchor_id = data[1]
 
-        if self.initializer.process_measurement(self.current_position, range_measurement, anchor_id):
+        self.initializer.process_measurement(self.current_position, range_measurement, anchor_id)
+
+        if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "optimised_trajectory":
             rospy.loginfo("Anchor initialized. Calculating optimal trajectory...")
-            waypoints = self.initializer.calculate_optimal_trajectory()
+            waypoints = self.initializer.optimal_waypoints
             self.publish_waypoints(waypoints)
     
     def publish_waypoints(self, waypoints):

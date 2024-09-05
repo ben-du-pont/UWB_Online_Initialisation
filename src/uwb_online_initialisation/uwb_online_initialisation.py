@@ -72,7 +72,7 @@ class UwbOnlineInitialisation:
         self.trajectory_optimiser = TrajectoryOptimization()
 
         # Trajectory to follow
-        self.trajectory = Trajectory()
+        self.trajectory = None
 
         # Trajectory discretised
         self.spline_x = None
@@ -83,6 +83,7 @@ class UwbOnlineInitialisation:
         self.spline_y_optimal = None
         self.spline_z_optimal = None
 
+        self.optimal_waypoints = None
 
         # Tuning parameters for the pipeline
         self.params = {
@@ -1323,7 +1324,8 @@ class UwbOnlineInitialisation:
                     self.trajectory_optimiser.method = self.params["trajectory_optimisation_method"]
                     # Optimize the trajectory using the previous measurements and the rough estimate of the anchor 
                     optimal_waypoints = self.trajectory_optimiser.optimize_waypoints_incrementally_spherical(estimator, anchor_estimate_variance, previous_measurement_positions, remaining_trajectory, radius_of_search = 0.5, max_waypoints=8, marginal_gain_threshold=0.01)
-                    
+                    self.optimal_waypoints = optimal_waypoints
+
                     # Create a spline trajectory from the optimal waypoints, to collect the measurements but also go back to the initial mission
                     optimal_trajectory = self.trajectory_optimiser.create_optimal_trajectory(previous_measurement_positions[-1], optimal_waypoints)
                     full_end_trajectory = self.trajectory_optimiser.create_full_optimised_trajectory(previous_measurement_positions[-1], optimal_waypoints, initial_trajectory)
@@ -1379,7 +1381,7 @@ class UwbOnlineInitialisation:
             self.process_measurement_optimal_trajectory(drone_position, distance, anchor_id) # Decide what to do with the measurement
 
             # if all measurements are collected, run the final estimate and set it as initialised
-            if drone_position == [self.spline_x_optimal[-1], self.spline_y_optimal[-1], self.spline_z_optimal[-1]]:
+            if np.sqrt(np.linalg.norm(drone_position - [self.spline_x_optimal[-1], self.spline_y_optimal[-1], self.spline_z_optimal[-1]])) < 0.3:
                 measurements = []
                 for distance, position in zip(anchor_measurement_dictionary["distances_pre_rough_estimate"]+anchor_measurement_dictionary["distances_post_rough_estimate"], anchor_measurement_dictionary["positions_pre_rough_estimate"] + anchor_measurement_dictionary["positions_post_rough_estimate"]):
                     x, y, z = position
