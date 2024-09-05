@@ -1327,13 +1327,17 @@ class UwbOnlineInitialisation:
                     self.optimal_waypoints = optimal_waypoints
 
                     # Create a spline trajectory from the optimal waypoints, to collect the measurements but also go back to the initial mission
-                    optimal_trajectory = self.trajectory_optimiser.create_optimal_trajectory(previous_measurement_positions[-1], optimal_waypoints)
-                    full_end_trajectory = self.trajectory_optimiser.create_full_optimised_trajectory(previous_measurement_positions[-1], optimal_waypoints, initial_trajectory)
+                    # optimal_trajectory = self.trajectory_optimiser.create_optimal_trajectory(previous_measurement_positions[-1], optimal_waypoints)
+                    # full_end_trajectory = self.trajectory_optimiser.create_full_optimised_trajectory(previous_measurement_positions[-1], optimal_waypoints, initial_trajectory)
                     
-                    self.spline_x_optimal, self.spline_y_optimal, self.spline_z_optimal = optimal_trajectory.spline_x, optimal_trajectory.spline_y, optimal_trajectory.spline_z
-                    self.spline_x, self.spline_y, self.spline_z = full_end_trajectory.spline_x, full_end_trajectory.spline_y, full_end_trajectory.spline_z
+                    # self.spline_x_optimal, self.spline_y_optimal, self.spline_z_optimal = optimal_trajectory.spline_x, optimal_trajectory.spline_y, optimal_trajectory.spline_z
+                    # self.spline_x, self.spline_y, self.spline_z = full_end_trajectory.spline_x, full_end_trajectory.spline_y, full_end_trajectory.spline_z
                     
                     self.anchor_measurements_dictionary[anchor_id]["status"] = "optimised_trajectory"
+
+                    if optimal_waypoints is None:
+                        print("No optimal waypoints found")
+                        self.anchor_measurements_dictionary[anchor_id]["status"] = "initialised"
 
                 
 
@@ -1381,7 +1385,8 @@ class UwbOnlineInitialisation:
             self.process_measurement_optimal_trajectory(drone_position, distance, anchor_id) # Decide what to do with the measurement
 
             # if all measurements are collected, run the final estimate and set it as initialised
-            if np.sqrt(np.linalg.norm(drone_position - [self.spline_x_optimal[-1], self.spline_y_optimal[-1], self.spline_z_optimal[-1]])) < 0.3:
+            if np.sqrt(np.linalg.norm(drone_position - [self.optimal_waypoints[-1][0], self.optimal_waypoints[-1][0], self.optimal_waypoints[-1][0]])) < 0.3:
+
                 measurements = []
                 for distance, position in zip(anchor_measurement_dictionary["distances_pre_rough_estimate"]+anchor_measurement_dictionary["distances_post_rough_estimate"], anchor_measurement_dictionary["positions_pre_rough_estimate"] + anchor_measurement_dictionary["positions_post_rough_estimate"]):
                     x, y, z = position

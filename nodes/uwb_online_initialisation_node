@@ -10,6 +10,9 @@ from uwb_online_initialisation import UwbOnlineInitialisation
 
 class UWBAnchorInitialisationNode:
     def __init__(self):
+
+        self.current_position = None
+
         # Initialize the UWB initializer instance
         self.initializer = UwbOnlineInitialisation()
 
@@ -30,13 +33,21 @@ class UWBAnchorInitialisationNode:
         range_measurement = float(data[0])
         anchor_id = data[1]
 
+        if self.current_position is None:
+            rospy.logwarn("Drone position not received yet. Ignoring range measurement.")
+            return
+        
         self.initializer.process_measurement(self.current_position, range_measurement, anchor_id)
 
         if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "optimised_trajectory":
-            rospy.loginfo("Anchor initialized. Calculating optimal trajectory...")
+            rospy.loginfo("Anchor pre-initialized. Calculating optimal trajectory...")
             waypoints = self.initializer.optimal_waypoints
             self.publish_waypoints(waypoints)
-    
+
+        if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "initialised":
+            rospy.loginfo(f"Anchor {anchor_id} initialized.")
+
+
     def publish_waypoints(self, waypoints):
         pass
     
