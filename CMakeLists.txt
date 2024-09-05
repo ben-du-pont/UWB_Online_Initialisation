@@ -7,6 +7,8 @@ project(uwb_online_initialisation)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
+  uwb_ros_driver
+  geometry_msgs
 )
 
 catkin_python_setup()
