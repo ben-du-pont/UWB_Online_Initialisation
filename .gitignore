@@ -160,3 +160,38 @@ cython_debug/
 #  and can be added to the global gitignore or merged into this file.  For a more nuclear
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
+
+# ROS
+# Build
+build/
+devel/
+
+# Logs
+*.log
+
+# Generated files
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.dll
+*.exe
+*.out
+
+# Catkin workspace
+*.catkin_workspace
+
+# ROS package dependencies
+rosdep/
+rosinstall/
+rospkg/
+
+# ROS package build artifacts
+CMakeLists.txt.user
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+bin/
+lib/
+include/
+share/

@@ -1,0 +1,18 @@
+<launch>
+  <!-- ************************************************************** -->
+  <!--     ROSLAUNCH FILE    (http://wiki.ros.org/roslaunch/)         -->
+  <!--                                                                -->
+  <!-- Launch files automate launching ROS nodes, services, etc.      -->
+  <!-- ************************************************************** -->
+
+  <!-- Required arguments: -->
+  <arg name="config" default="$(find uwb_online_initialisation)/config/uwb_online_initialisation_node.yaml" />
+
+  <!-- Launch the uwb_online_initialisation_node using the generic_node.launch -->
+  <include file="$(find uwb_online_initialisation)/launch/generic_node.launch">
+    <arg name="package" value="uwb_online_initialisation" />
+    <arg name="exec" value="uwb_online_initialisation_node" />
+    <arg name="name" value="uwb_online_initialisation_node" />
+    <arg name="config" value="$(arg config)" />
+  </include>
+</launch>

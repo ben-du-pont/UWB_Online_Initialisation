@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+
+import rospy
+from geometry_msgs.msg import Point
+from std_msgs.msg import Float32, String
+from uwb_online_initialisation import UwbOnlineInitialisation
+
+
+
+
+class UWBAnchorInitialisationNode:
+    def __init__(self):
+        # Initialize the UWB initializer instance
+        self.initializer = UwbOnlineInitialisation()
+
+        # Subscribers
+        rospy.Subscriber("/drone/position", Point, self.position_callback)
+        rospy.Subscriber("/uwb/range", String, self.range_callback)
+
+        # Publisher
+        # self.waypoints_pub = rospy.Publisher("/uwb/waypoints", Waypoint, queue_size=10)
+
+    def position_callback(self, msg):
+        self.current_position = (msg.x, msg.y, msg.z)
+        rospy.loginfo(f"Received drone position: {self.current_position}")
+        
+
+    def range_callback(self, msg):
+        data = msg.data.split(',')
+        range_measurement = float(data[0])
+        anchor_id = data[1]
+
+        if self.initializer.process_measurement(self.current_position, range_measurement, anchor_id):
+            rospy.loginfo("Anchor initialized. Calculating optimal trajectory...")
+            waypoints = self.initializer.calculate_optimal_trajectory()
+            self.publish_waypoints(waypoints)
+    
+    def publish_waypoints(self, waypoints):
+        pass
+    
+        for wp in waypoints:
+            waypoint_msg = Waypoint()
+            waypoint_msg.x = wp[0]
+            waypoint_msg.y = wp[1]
+            waypoint_msg.z = wp[2]
+            self.waypoints_pub.publish(waypoint_msg)
+            rospy.loginfo(f"Published waypoint: {waypoint_msg}")
+
+if __name__ == "__main__":
+    rospy.init_node('uwb_anchor_initialization_node', anonymous=True)
+    node = UWBAnchorInitialisationNode()
+    rospy.spin()
