@@ -254,7 +254,7 @@ class TrajectoryOptimization:
                 last_measurement = new_waypoint
 
             else:
-                print(f"Optimization failed at waypoint {_ + 1}")
+                print(f"Optimization failed at waypoint {i + 1}")
                 break
 
             # Initial guess for the next waypoint

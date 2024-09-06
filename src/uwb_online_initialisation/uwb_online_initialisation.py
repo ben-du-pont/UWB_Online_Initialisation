@@ -1208,7 +1208,7 @@ class UwbOnlineInitialisation:
         Parameters:
         - drone_position: list of floats, the current drone position [x, y, z]"""
 
-        drone_x, drone_y, drone_z = drone_position
+        # drone_x, drone_y, drone_z = drone_position
         
 
         # The anchor has never been seen before, process the measurement and initialise the dictionnary
@@ -1385,7 +1385,7 @@ class UwbOnlineInitialisation:
             self.process_measurement_optimal_trajectory(drone_position, distance, anchor_id) # Decide what to do with the measurement
 
             # if all measurements are collected, run the final estimate and set it as initialised
-            if np.sqrt(np.linalg.norm(drone_position - [self.optimal_waypoints[-1][0], self.optimal_waypoints[-1][0], self.optimal_waypoints[-1][0]])) < 0.3:
+            if np.sqrt(np.linalg.norm(np.array(drone_position) - np.array(self.optimal_waypoints[-1]))) < 0.3:
 
                 measurements = []
                 for distance, position in zip(anchor_measurement_dictionary["distances_pre_rough_estimate"]+anchor_measurement_dictionary["distances_post_rough_estimate"], anchor_measurement_dictionary["positions_pre_rough_estimate"] + anchor_measurement_dictionary["positions_post_rough_estimate"]):

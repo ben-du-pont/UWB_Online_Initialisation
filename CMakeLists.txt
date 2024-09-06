@@ -9,6 +9,7 @@ find_package(catkin REQUIRED COMPONENTS
   std_msgs
   uwb_ros_driver
   geometry_msgs
+  mission_sequencer
 )
 
 catkin_python_setup()

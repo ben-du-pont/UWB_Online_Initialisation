@@ -1,19 +1,26 @@
 #!/usr/bin/env python3
 
 import rospy
-from geometry_msgs.msg import PoseStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from std_msgs.msg import Float32, String
 from uwb_online_initialisation import UwbOnlineInitialisation
 
-from uwb_ros_driver import Uwb
+from uwb_ros_driver.msg import Uwb
+from mission_sequencer.msg import MissionWaypointArray, MissionWaypoint
 
+
+# rosbag record -o ~/dupont_cws/bagfiles/trajectory_1 /mussol/uwb_driver_node/uwb /mavros/vision_pose/pose /uwb_message/uwb_range_and_pose
 
 
 class UWBAnchorInitialisationNode:
+    __pose_received = False
+    __range_received = False
+    __trajectory_published = False
+
     def __init__(self):
 
         self.current_position = None
-
+        self.current_orientation = None
         # Initialize the UWB initializer instance
         self.initializer = UwbOnlineInitialisation()
 
@@ -22,45 +29,116 @@ class UWBAnchorInitialisationNode:
         rospy.Subscriber("/mussol/uwb_driver_node/uwb", Uwb, self.range_callback)
 
         # Publisher
-        # self.waypoints_pub = rospy.Publisher("/uwb/waypoints", Waypoint, queue_size=10)
+        self.waypoints_pub = rospy.Publisher("/mission_sequencer/waypoint_list", MissionWaypointArray, queue_size=10)
+        self.combined_pub = rospy.Publisher("/uwb_message/uwb_range_and_pose", PoseWithCovarianceStamped, queue_size=10)
 
     def position_callback(self, msg):
         self.current_position = (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z)
-        rospy.loginfo(f"Received drone position: {self.current_position}")
+        self.current_orientation = (msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w)
+        if not self.__pose_received:
+            rospy.loginfo(f"Received drone position: {self.current_position}")
+            self.__pose_received = True
         
+    def drone_to_tag_transformation():
+        pass
+
+    def tag_to_drone_transformation():
+        pass
 
     def range_callback(self, msg):
         
         anchor_id = msg.ranges[0].id
         range_measurement = msg.ranges[0].distance
 
+        rospy.loginfo("\n")
+
+        # if not self.__range_received:
+        rospy.loginfo(f"Range received: {anchor_id} - {range_measurement} - {self.current_position}")
+            # self.__range_received = True
 
         if self.current_position is None:
             rospy.logwarn("Drone position not received yet. Ignoring range measurement.")
             return
         
-        self.initializer.process_measurement(self.current_position, range_measurement, anchor_id)
-
-        if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "optimised_trajectory":
-            rospy.loginfo("Anchor pre-initialized. Calculating optimal trajectory...")
-            waypoints = self.initializer.optimal_waypoints
-            # self.publish_waypoints(waypoints)
-            rospy.loginfo("Optimal waypoints:", waypoints)
-
-        if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "initialised":
-            rospy.loginfo(f"Anchor {anchor_id} initialized.")
+        self.publish_combined_message(range_measurement, anchor_id)
 
 
-    # def publish_waypoints(self, waypoints):
-    #     pass
+        # Comment out all this to ignore the anchor estimation and just get bags
 
-    #     for wp in waypoints:
-    #         waypoint_msg = Waypoint()
-    #         waypoint_msg.x = wp[0]
-    #         waypoint_msg.y = wp[1]
-    #         waypoint_msg.z = wp[2]
-    #         self.waypoints_pub.publish(waypoint_msg)
-    #         rospy.loginfo(f"Published waypoint: {waypoint_msg}")
+        # self.initializer.measurement_callback(self.current_position, range_measurement, anchor_id)
+
+        # rospy.loginfo(f"status: {self.initializer.anchor_measurements_dictionary[anchor_id]['status']}")
+        # rospy.loginfo(f"len(positions_pre_rough_estimate): {len(self.initializer.anchor_measurements_dictionary[anchor_id]['positions_pre_rough_estimate'])}")
+        # rospy.loginfo(f"len(distances_pre_rough_estimate): {len(self.initializer.anchor_measurements_dictionary[anchor_id]['distances_pre_rough_estimate'])}")
+        # rospy.loginfo(f"estimator_rough_linear: {self.initializer.anchor_measurements_dictionary[anchor_id]['estimator_rough_linear']}")
+
+
+        # if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "optimised_trajectory":
+        #     rospy.loginfo(f"estimator_rough_non_linear: {self.initializer.anchor_measurements_dictionary[anchor_id]['estimator_rough_non_linear']}")
+        #     rospy.loginfo("Anchor pre-initialized. Calculating optimal trajectory...")
+        #     waypoints = self.initializer.optimal_waypoints
+        #     if not self.__trajectory_published:
+        #         self.publish_waypoints(waypoints)
+        #         self.__trajectory_published = True
+
+        #         rospy.loginfo(f"Optimal waypoints: {waypoints}")
+
+        # if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "initialised":
+        #     rospy.loginfo(f"Anchor {anchor_id} initialized.")
+
+
+    def publish_combined_message(self, range_measurement, anchor_id):
+        # Create a PoseWithCovarianceStamped message
+        combined_msg = PoseWithCovarianceStamped()
+
+        # Fill in the pose (position and orientation)
+        combined_msg.pose.pose.position.x = self.current_position[0]
+        combined_msg.pose.pose.position.y = self.current_position[1]
+        combined_msg.pose.pose.position.z = self.current_position[2]
+
+        combined_msg.pose.pose.orientation.x = self.current_orientation[0]
+        combined_msg.pose.pose.orientation.y = self.current_orientation[1]
+        combined_msg.pose.pose.orientation.z = self.current_orientation[2]
+        combined_msg.pose.pose.orientation.w = self.current_orientation[3]
+
+        # Use covariance field to store the range (arbitrarily using the first element of covariance matrix)
+        combined_msg.pose.covariance[0] = range_measurement
+
+        # Use header frame_id to store the anchor ID
+        combined_msg.header.frame_id = f"anchor_{anchor_id}"
+
+        # Set the timestamp to current time
+        combined_msg.header.stamp = rospy.Time.now()
+
+        # Publish the combined message
+        self.combined_pub.publish(combined_msg)
+        rospy.loginfo("Published combined pose and UWB range message")
+
+
+
+    def publish_waypoints(self, waypoints):
+        waypoint_list_msg = MissionWaypointArray()
+        waypoint_list = []
+
+        for wp in waypoints:
+            waypoint_msg = MissionWaypoint()
+            waypoint_msg.x = wp[0]
+            waypoint_msg.y = wp[1]
+            waypoint_msg.z = wp[2]
+            waypoint_msg.yaw = 0
+            waypoint_msg.holdtime = 2
+
+            waypoint_list.append(waypoint_msg)
+
+        waypoint_list_msg.waypoints = waypoint_list
+        waypoint_list_msg.action = MissionWaypointArray.CLEAR
+        waypoint_list_msg.reference = MissionWaypointArray.GLOBAL
+
+        
+
+
+        self.waypoints_pub.publish(waypoint_list_msg)
+        rospy.loginfo(f"Published waypoint: {len(waypoint_list)}")
 
 if __name__ == "__main__":
     rospy.init_node('uwb_anchor_initialization_node', anonymous=True)
