@@ -1,15 +1,24 @@
 #!/usr/bin/env python3
 
 import rospy
+import threading
+import queue
+
+import numpy as np
+
+from message_filters import ApproximateTimeSynchronizer, Subscriber
+
 from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
 from std_msgs.msg import Float32, String
 from uwb_online_initialisation import UwbOnlineInitialisation
+import tf.transformations
+from visualization_msgs.msg import Marker, MarkerArray
 
 from uwb_ros_driver.msg import Uwb
 from mission_sequencer.msg import MissionWaypointArray, MissionWaypoint
 
 
-# rosbag record -o ~/dupont_cws/bagfiles/trajectory_1 /mussol/uwb_driver_node/uwb /mavros/vision_pose/pose /uwb_message/uwb_range_and_pose
+# rosbag record -o ~/dupont_cws/bagfiles/experiment_run_1 /mussol/uwb_driver_node/uwb /mavros/vision_pose/pose /uwb_message/uwb_range_and_pose
 
 
 class UWBAnchorInitialisationNode:
@@ -17,34 +26,70 @@ class UWBAnchorInitialisationNode:
     __range_received = False
     __trajectory_published = False
 
+    TAG_OFFSET_X = 0.0
+    TAG_OFFSET_Y = -0.035
+    TAG_OFFSET_Z = -0.06
+
+    anchor_1_gt = [2.357514, -0.369072, 0.335518]
+    anchor_2_gt = [6.996823, -1.347588, 0.869851]
+    anchor_3_gt = [5.068104, 4.253319, 0.733376]
+    anchor_4_gt = [1.841671, 3.997815, 1.975195]
+    anchors_list = [anchor_1_gt, anchor_2_gt, anchor_3_gt, anchor_4_gt]
+
+    mission_waypoints = [[0.0, 0.0, 1.0], [1.0,1.0,1.0], [6.0, 2.7, 1.0], [0.0, 0.0, 1.0]]
+
+    anchor_status = {
+        "1": "unseen",
+        "2": "unseen",
+        "3": "unseen",
+        "4": "unseen",
+    }
+
     def __init__(self):
 
         self.current_position = None
         self.current_orientation = None
+        self.current_tag_position = None
+
         # Initialize the UWB initializer instance
         self.initializer = UwbOnlineInitialisation()
+        self.initializer.passed_waypoints = [self.mission_waypoints[0]]
+        self.initializer.remaining_waypoints = self.mission_waypoints[1:]
+        rospy.loginfo(f"passed waypoints: {self.initializer.passed_waypoints}")
+        rospy.loginfo(f"remaining waypoints: {self.initializer.remaining_waypoints}")
+        # Subscribers using message filters for time synchronization
+        pose_sub = Subscriber("/mavros/vision_pose/pose", PoseStamped)
+        range_sub = Subscriber("/mussol/uwb_driver_node/uwb", Uwb)
 
-        # Subscribers
-        rospy.Subscriber("/mavros/vision_pose/pose", PoseStamped, self.position_callback)
-        rospy.Subscriber("/mussol/uwb_driver_node/uwb", Uwb, self.range_callback)
+        # Use ApproximateTimeSynchronizer to sync pose and range messages
+        ats = ApproximateTimeSynchronizer([pose_sub, range_sub], queue_size=10, slop=0.1)
+        ats.registerCallback(self.synchronized_callback)
+
+        # # Subscribers
+        # rospy.Subscriber("/mavros/vision_pose/pose", PoseStamped, self.position_callback)
+        # rospy.Subscriber("/mussol/uwb_driver_node/uwb", Uwb, self.range_callback)
 
         # Publisher
         self.waypoints_pub = rospy.Publisher("/mission_sequencer/waypoint_list", MissionWaypointArray, queue_size=10)
         self.combined_pub = rospy.Publisher("/uwb_message/uwb_range_and_pose", PoseWithCovarianceStamped, queue_size=10)
+        self.marker_pub = rospy.Publisher("/visualization_marker_array", MarkerArray, queue_size=10)
+        self.anchors_marker_pub = rospy.Publisher("/visualization_anchors", MarkerArray, queue_size=10)
+        self.anchors_estimate_marker_pub = rospy.Publisher("/visualization_anchors_estimate", MarkerArray, queue_size=10)
+        self.final_anchors_estimate_marker_pub = rospy.Publisher("/visualization_final_anchors_estimate", MarkerArray, queue_size=10)
+        self.processing_queue = queue.Queue()
+        self.processing_thread = threading.Thread(target=self.process_queue)
+        self.processing_thread.start()
 
+
+    # No longer used
     def position_callback(self, msg):
         self.current_position = (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z)
         self.current_orientation = (msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w)
         if not self.__pose_received:
             rospy.loginfo(f"Received drone position: {self.current_position}")
             self.__pose_received = True
-        
-    def drone_to_tag_transformation():
-        pass
-
-    def tag_to_drone_transformation():
-        pass
-
+    
+    # No longer used
     def range_callback(self, msg):
         
         anchor_id = msg.ranges[0].id
@@ -87,6 +132,132 @@ class UWBAnchorInitialisationNode:
         #     rospy.loginfo(f"Anchor {anchor_id} initialized.")
 
 
+    def synchronized_callback(self, pose_msg, uwb_msg):
+        self.current_position = (pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z)
+        self.current_orientation = (pose_msg.pose.orientation.x, pose_msg.pose.orientation.y, pose_msg.pose.orientation.z, pose_msg.pose.orientation.w)
+
+        anchor_id = uwb_msg.ranges[0].id
+        range_measurement = uwb_msg.ranges[0].distance
+
+        self.waypoint_checkpoint(self.current_position)
+
+        
+
+        # compensate for the tag to drone transformation
+        self.current_tag_position = self.drone_to_tag_transformation(self.current_position, self.current_orientation)
+
+        # rospy.loginfo(f"Synchronized Range: {anchor_id} - {range_measurement} - Position: {self.current_tag_position}")
+        rospy.loginfo(f"Printing the bounds : {self.initializer.trajectory_optimiser.bounds}")
+        # Proceed to publish the combined message
+        self.publish_combined_message(range_measurement, anchor_id)
+
+        self.processing_queue.put((self.current_tag_position, range_measurement, anchor_id))
+
+        if self.anchor_status[anchor_id] == "to_be_saved":
+            self.initializer.save_measurements_to_csv(anchor_id, f"/home/nvidia/dupont_cws/csv_files/run3_{anchor_id}_results.csv")
+            self.anchor_status[anchor_id] = "done"
+            rospy.loginfo("Published the csv file")
+
+
+    def process_queue(self):
+        while not rospy.is_shutdown():
+            try:
+                # Fetch the next item from the queue
+                position, range_measurement, anchor_id = self.processing_queue.get(timeout=1)
+
+                # Call the long-running initializer function here
+                new_tag_waypoints = self.initializer.measurement_callback(position, range_measurement, anchor_id)
+
+                if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "initialised":
+                    if self.anchor_status[anchor_id] == "unseen":
+                        self.anchor_status[anchor_id] = "to_be_saved"
+                rospy.loginfo(f"Processed anchor {anchor_id} with position {position} and range {range_measurement}")
+
+                self.publish_anchors_gt()
+                anchor_current_estimate = [self.initializer.anchor_measurements_dictionary[anchor_id]["estimator"][:3]]
+
+                self.publish_current_anchors_estimate(anchor_current_estimate)
+                if new_tag_waypoints is not None:
+                    rospy.loginfo(f"Optimal waypoints: {new_tag_waypoints}")
+                    drone_waypoints = []
+                    for wp in new_tag_waypoints:
+                        drone_wp, _ = self.tag_to_drone_transformation(wp)
+                        rospy.loginfo(f"Waypoint: {wp}")
+                        drone_waypoints.append(drone_wp)
+                        
+                    self.publish_waypoints(drone_waypoints)
+                    anchor_estimate = [self.initializer.anchor_measurements_dictionary[anchor_id]["estimator"][:3]]
+                    self.publish_anchors_estimate(anchor_estimate)
+                    
+                self.processing_queue.task_done()  # Mark this task as done
+            except queue.Empty:
+                rospy.loginfo("QUEUE IS EMPTY")
+                continue
+    
+    def waypoint_checkpoint(self, drone_position):
+        """Function to check if the drone is close to a waypoint and if so, update the remaining waypoints."""
+
+        if self.initializer.remaining_waypoints:
+            if np.linalg.norm(np.array(drone_position) - np.array(self.initializer.remaining_waypoints[0])) < 0.3:
+                self.initializer.passed_waypoints.append(self.initializer.remaining_waypoints[0])
+                self.initializer.remaining_waypoints.pop(0)
+                rospy.loginfo(f"Waypoint reached, {len(self.initializer.remaining_waypoints)} remaining")
+                rospy.loginfo(self.initializer.remaining_waypoints)
+
+    
+    def rotate_vector_by_quaternion(self, vector, quaternion):
+        # Create a 4D vector from the input vector (x, y, z) with w=0 for quaternion multiplication
+        vector_q = [vector[0], vector[1], vector[2], 0]
+
+        # Apply the quaternion rotation: q * v * q^(-1)
+        q_inv = tf.transformations.quaternion_inverse(quaternion)
+        rotated_vector_q = tf.transformations.quaternion_multiply(
+            tf.transformations.quaternion_multiply(quaternion, vector_q), q_inv
+        )
+
+        # Return only the rotated vector part (x, y, z)
+        return rotated_vector_q[:3]
+
+
+    def drone_to_tag_transformation(self, drone_position, drone_orientation):
+
+        tag_translation = [self.TAG_OFFSET_X, self.TAG_OFFSET_Y, self.TAG_OFFSET_Z]
+
+        # Rotate the translation vector by the drone's orientation
+        tag_translation_world = self.rotate_vector_by_quaternion(tag_translation, drone_orientation)
+
+        # Compute the tag's world position by adding the rotated translation to the drone's position
+        tag_position_world = [
+            drone_position[0] + tag_translation_world[0],
+            drone_position[1] + tag_translation_world[1],
+            drone_position[2] + tag_translation_world[2],
+        ]
+
+        return tag_position_world
+
+    def tag_to_drone_transformation(self, tag_position):
+        # Assuming drone orientation is fixed (yaw = 0, i.e., aligned with the global frame axes)
+        drone_orientation = [0, 0, 0, 1]  # Quaternion representing zero rotation
+
+        # Tag translation in the drone's frame (offset from the drone's center of gravity)
+        tag_translation = [self.TAG_OFFSET_X, self.TAG_OFFSET_Y, self.TAG_OFFSET_Z]
+
+        # Rotate the tag offset by the drone's orientation (should result in no change since orientation is zero)
+        tag_translation_world = self.rotate_vector_by_quaternion(tag_translation, drone_orientation)
+
+        # Compute the drone's position by subtracting the rotated tag offset from the desired tag position
+        drone_position_world = [
+            tag_position[0] - tag_translation_world[0],
+            tag_position[1] - tag_translation_world[1],
+            tag_position[2] - tag_translation_world[2],
+        ]
+
+        return drone_position_world, drone_orientation
+
+        
+
+
+
     def publish_combined_message(self, range_measurement, anchor_id):
         # Create a PoseWithCovarianceStamped message
         combined_msg = PoseWithCovarianceStamped()
@@ -103,6 +274,9 @@ class UWBAnchorInitialisationNode:
 
         # Use covariance field to store the range (arbitrarily using the first element of covariance matrix)
         combined_msg.pose.covariance[0] = range_measurement
+        combined_msg.pose.covariance[1] = self.current_tag_position[0]
+        combined_msg.pose.covariance[2] = self.current_tag_position[1]
+        combined_msg.pose.covariance[3] = self.current_tag_position[2]
 
         # Use header frame_id to store the anchor ID
         combined_msg.header.frame_id = f"anchor_{anchor_id}"
@@ -115,32 +289,195 @@ class UWBAnchorInitialisationNode:
         rospy.loginfo("Published combined pose and UWB range message")
 
 
+    def publish_anchors_gt(self):
+        marker_array = MarkerArray()
+
+        for i, wp in enumerate(self.anchors_list):
+            if wp[0] is np.nan or wp[1] is np.nan or wp[2] is np.nan:
+                continue
+
+            # Create a marker for this waypoint
+            marker = Marker()
+            marker.header.frame_id = "vicon"  # Adjust according to your frame of reference
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "waypoints"
+            marker.id = i + 1  # Make sure each marker has a unique ID
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position.x = wp[0]
+            marker.pose.position.y = wp[1]
+            marker.pose.position.z = wp[2]
+            marker.pose.orientation.w = 1.0  # No rotation for a sphere
+            marker.scale.x = 0.2  # Scale the sphere (0.2m diameter)
+            marker.scale.y = 0.2
+            marker.scale.z = 0.2
+            marker.color.a = 1.0  # Alpha (opacity)
+            marker.color.r = 0.0  
+            marker.color.g = 0.0
+            marker.color.b = 1.0
+            marker_array.markers.append(marker)
+        
+        self.anchors_marker_pub.publish(marker_array)
+
+    def publish_anchors_estimate(self, anchors_estimate):
+        marker_array = MarkerArray()
+
+        for i, wp in enumerate(anchors_estimate):
+            if wp[0] is np.nan or wp[1] is np.nan or wp[2] is np.nan:
+                continue
+
+            # Create a marker for this waypoint
+            marker = Marker()
+            marker.header.frame_id = "vicon"  # Adjust according to your frame of reference
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "waypoints"
+            marker.id = 1  # Make sure each marker has a unique ID
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position.x = wp[0]
+            marker.pose.position.y = wp[1]
+            marker.pose.position.z = wp[2]
+            marker.pose.orientation.w = 1.0  # No rotation for a sphere
+            marker.scale.x = 0.2  # Scale the sphere (0.2m diameter)
+            marker.scale.y = 0.2
+            marker.scale.z = 0.2
+            marker.color.a = 1.0  # Alpha (opacity)
+            marker.color.r = 1.0  
+            marker.color.g = 1.0
+            marker.color.b = 0.0
+            marker_array.markers.append(marker)
+        
+        self.anchors_estimate_marker_pub.publish(marker_array)
+
+    def publish_current_anchors_estimate(self, anchors_estimate):
+        marker_array = MarkerArray()
+
+        for i, wp in enumerate(anchors_estimate):
+            if wp[0] is np.nan or wp[1] is np.nan or wp[2] is np.nan:
+                continue
+
+            # Create a marker for this waypoint
+            marker = Marker()
+            marker.header.frame_id = "vicon"  # Adjust according to your frame of reference
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "waypoints"
+            marker.id = i + 1  # Make sure each marker has a unique ID
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position.x = wp[0]
+            marker.pose.position.y = wp[1]
+            marker.pose.position.z = wp[2]
+            marker.pose.orientation.w = 1.0  # No rotation for a sphere
+            marker.scale.x = 0.2  # Scale the sphere (0.2m diameter)
+            marker.scale.y = 0.2
+            marker.scale.z = 0.2
+            marker.color.a = 0.7  # Alpha (opacity)
+            marker.color.r = 1.0  
+            marker.color.g = 1.0
+            marker.color.b = 1.0
+            marker_array.markers.append(marker)
+        
+        self.final_anchors_estimate_marker_pub.publish(marker_array)
 
     def publish_waypoints(self, waypoints):
         waypoint_list_msg = MissionWaypointArray()
         waypoint_list = []
+        
+        # MarkerArray for RViz visualization
+        marker_array = MarkerArray()
 
-        for wp in waypoints:
+        # Add a pause hold at the first waypoint to avoid the drone flying off immediately
+        pause_waypoint = MissionWaypoint()
+        pause_waypoint.x = self.current_position[0]
+        pause_waypoint.y = self.current_position[1]
+        pause_waypoint.z = self.current_position[2]
+        pause_waypoint.yaw = 0
+        pause_waypoint.holdtime = 20
+        waypoint_list.append(pause_waypoint)
+
+        # Marker for the first waypoint (pause point)
+        marker = Marker()
+        marker.header.frame_id = "vicon"  # Adjust according to your frame of reference
+        marker.header.stamp = rospy.Time.now()
+        marker.ns = "waypoints"
+        marker.id = 0
+        marker.type = Marker.SPHERE
+        marker.action = Marker.ADD
+        marker.pose.position.x = pause_waypoint.x
+        marker.pose.position.y = pause_waypoint.y
+        marker.pose.position.z = pause_waypoint.z
+        marker.pose.orientation.w = 1.0  # No rotation for a sphere
+        marker.scale.x = 0.2  # Scale the sphere (0.2m diameter)
+        marker.scale.y = 0.2
+        marker.scale.z = 0.2
+        marker.color.a = 1.0  # Alpha (opacity)
+        marker.color.r = 1.0  # Red color
+        marker.color.g = 0.0
+        marker.color.b = 0.0
+        marker_array.markers.append(marker)
+
+
+        for i, wp in enumerate(waypoints):
+            if wp[0] is np.nan or wp[1] is np.nan or wp[2] is np.nan:
+                continue
             waypoint_msg = MissionWaypoint()
             waypoint_msg.x = wp[0]
             waypoint_msg.y = wp[1]
             waypoint_msg.z = wp[2]
             waypoint_msg.yaw = 0
-            waypoint_msg.holdtime = 2
+            waypoint_msg.holdtime = 1
 
             waypoint_list.append(waypoint_msg)
+
+             # Create a marker for this waypoint
+            marker = Marker()
+            marker.header.frame_id = "vicon"  # Adjust according to your frame of reference
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "waypoints"
+            marker.id = i + 1  # Make sure each marker has a unique ID
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position.x = wp[0]
+            marker.pose.position.y = wp[1]
+            marker.pose.position.z = wp[2]
+            marker.pose.orientation.w = 1.0  # No rotation for a sphere
+            marker.scale.x = 0.2  # Scale the sphere (0.2m diameter)
+            marker.scale.y = 0.2
+            marker.scale.z = 0.2
+            marker.color.a = 1.0  # Alpha (opacity)
+            marker.color.r = 0.0  # Green color for the rest of the waypoints
+            marker.color.g = 1.0
+            marker.color.b = 0.0
+            marker_array.markers.append(marker)
+
+
 
         waypoint_list_msg.waypoints = waypoint_list
         waypoint_list_msg.action = MissionWaypointArray.CLEAR
         waypoint_list_msg.reference = MissionWaypointArray.GLOBAL
 
         
-
+        self.marker_pub.publish(marker_array)
 
         self.waypoints_pub.publish(waypoint_list_msg)
         rospy.loginfo(f"Published waypoint: {len(waypoint_list)}")
 
+
+# if __name__ == "__main__":
+#     rospy.init_node('uwb_anchor_initialization_node', anonymous=True)
+#     node = UWBAnchorInitialisationNode()
+#     rospy.spin()
+
 if __name__ == "__main__":
     rospy.init_node('uwb_anchor_initialization_node', anonymous=True)
     node = UWBAnchorInitialisationNode()
-    rospy.spin()
+
+    # Allow ROS to spin and process callbacks
+    try:
+        rospy.spin()
+    except KeyboardInterrupt:
+        rospy.loginfo("Shutting down node")
+    
+    # Ensure the processing thread completes
+    node.processing_queue.join()
+
