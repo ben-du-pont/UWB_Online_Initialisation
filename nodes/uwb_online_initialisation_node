@@ -8,36 +8,43 @@ import numpy as np
 
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 
-from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped, TransformStamped
 from std_msgs.msg import Float32, String
 from uwb_online_initialisation import UwbOnlineInitialisation
 import tf.transformations
 from visualization_msgs.msg import Marker, MarkerArray
 
 from uwb_ros_driver.msg import Uwb
-from mission_sequencer.msg import MissionWaypointArray, MissionWaypoint
+from mission_sequencer.msg import MissionWaypointArray, MissionWaypoint, MissionWaypointStamped
 
 
-# rosbag record -o ~/dupont_cws/bagfiles/experiment_run_1 /mussol/uwb_driver_node/uwb /mavros/vision_pose/pose /uwb_message/uwb_range_and_pose
+# FOR BEN RUNS
+# rosbag record -o ~/dupont_cws/bagfiles/experiment_run_3 /mussol/uwb_driver_node/uwb /twins_cns6/vrpn_client/estimated_transform /uwb_message/uwb_range_and_pose
+
+# FOR IGOR RUNS
+# rosbag record -o ~/dupont_cws/bagfiles/igor_run_2 -a
 
 
 class UWBAnchorInitialisationNode:
-    __pose_received = False
-    __range_received = False
-    __trajectory_published = False
 
+    publish_optimal_waypoints = True
+    run_id = 8
     TAG_OFFSET_X = 0.0
     TAG_OFFSET_Y = -0.035
     TAG_OFFSET_Z = -0.06
 
-    anchor_1_gt = [2.357514, -0.369072, 0.335518]
-    anchor_2_gt = [6.996823, -1.347588, 0.869851]
-    anchor_3_gt = [5.068104, 4.253319, 0.733376]
-    anchor_4_gt = [1.841671, 3.997815, 1.975195]
+    anchor_1_gt = [-2.460, -1.744, 0.233]
+    anchor_2_gt = [3.049, -1.385, 0.896]
+    anchor_3_gt = [-2.794, 1.067, 2.006]
+    anchor_4_gt = [2.861, 2.463, 2.143]
+    
     anchors_list = [anchor_1_gt, anchor_2_gt, anchor_3_gt, anchor_4_gt]
 
-    mission_waypoints = [[0.0, 0.0, 1.0], [1.0,1.0,1.0], [6.0, 2.7, 1.0], [0.0, 0.0, 1.0]]
 
+    # This is hardcoded to initialise the UWB Online initialisation class, make sure they match with the mission csv file (without the take off point)
+    mission_waypoints = [[1,-2.8,0], [1,-2.8,1.0], [0,-2.8,1.0], [0,2.8,1.0], [0,-2.8,1.0]]
+
+    # Dictionnary to keep track of the anchor status to be able to write the csv only once
     anchor_status = {
         "1": "unseen",
         "2": "unseen",
@@ -53,110 +60,84 @@ class UWBAnchorInitialisationNode:
 
         # Initialize the UWB initializer instance
         self.initializer = UwbOnlineInitialisation()
-        self.initializer.passed_waypoints = [self.mission_waypoints[0]]
-        self.initializer.remaining_waypoints = self.mission_waypoints[1:]
-        rospy.loginfo(f"passed waypoints: {self.initializer.passed_waypoints}")
-        rospy.loginfo(f"remaining waypoints: {self.initializer.remaining_waypoints}")
+
+        # Initialise the path to follow in the initialiser
+        self.mission_waypoints_tag_frame = []
+        for waypoint in self.mission_waypoints:
+            tag_waypoint = self.drone_to_tag_transformation(waypoint)
+            self.mission_waypoints_tag_frame.append(tag_waypoint)
+
+        
+        self.initializer.passed_waypoints = [self.mission_waypoints_tag_frame[0]] # The take off point
+        self.initializer.remaining_waypoints = self.mission_waypoints_tag_frame[1:] # The points that the mission takes
+
+        rospy.loginfo(f"Initialised the passed waypoint in the UWB Online initialisation class: Passed Waypoints = {self.initializer.passed_waypoints}")
+        rospy.loginfo(f"Initialised the remaining waypoints in the UWB Online initialisation class: Remaining Waypoints =: {self.initializer.remaining_waypoints}")
+
+        
+
+        # # Subscribers
         # Subscribers using message filters for time synchronization
-        pose_sub = Subscriber("/mavros/vision_pose/pose", PoseStamped)
+        
+        # pose_sub = Subscriber("/mavros/vision_pose/pose", PoseStamped)
+        pose_sub = Subscriber("/twins_cns6/vrpn_client/estimated_transform", TransformStamped)
         range_sub = Subscriber("/mussol/uwb_driver_node/uwb", Uwb)
 
         # Use ApproximateTimeSynchronizer to sync pose and range messages
         ats = ApproximateTimeSynchronizer([pose_sub, range_sub], queue_size=10, slop=0.1)
         ats.registerCallback(self.synchronized_callback)
 
-        # # Subscribers
-        # rospy.Subscriber("/mavros/vision_pose/pose", PoseStamped, self.position_callback)
-        # rospy.Subscriber("/mussol/uwb_driver_node/uwb", Uwb, self.range_callback)
+        # Mission waypoints reached
+        rospy.Subscriber('/mission_sequencer/waypoint_reached', MissionWaypointStamped, self.waypoints_reached_callback)
 
         # Publisher
-        self.waypoints_pub = rospy.Publisher("/mission_sequencer/waypoint_list", MissionWaypointArray, queue_size=10)
-        self.combined_pub = rospy.Publisher("/uwb_message/uwb_range_and_pose", PoseWithCovarianceStamped, queue_size=10)
-        self.marker_pub = rospy.Publisher("/visualization_marker_array", MarkerArray, queue_size=10)
-        self.anchors_marker_pub = rospy.Publisher("/visualization_anchors", MarkerArray, queue_size=10)
-        self.anchors_estimate_marker_pub = rospy.Publisher("/visualization_anchors_estimate", MarkerArray, queue_size=10)
-        self.final_anchors_estimate_marker_pub = rospy.Publisher("/visualization_final_anchors_estimate", MarkerArray, queue_size=10)
-        self.processing_queue = queue.Queue()
-        self.processing_thread = threading.Thread(target=self.process_queue)
+        self.waypoints_pub = rospy.Publisher("/mission_sequencer/waypoint_list", MissionWaypointArray, queue_size=10) # To publish the optimal waypoints to the FlightStack
+        self.combined_pub = rospy.Publisher("/uwb_message/uwb_range_and_pose", PoseWithCovarianceStamped, queue_size=10) # To publish the synchronised pose and uwb range to get better rosbags
+
+        self.marker_pub = rospy.Publisher("/visualization_marker_array", MarkerArray, queue_size=10) # Visualisation of the optimal trajectory
+        self.anchors_marker_pub = rospy.Publisher("/visualization_anchors", MarkerArray, queue_size=10) # Ground truth visualistion for the anchors
+        self.anchors_estimate_marker_pub = rospy.Publisher("/visualization_anchors_estimate", MarkerArray, queue_size=10) # Visualisation for the estimate of the anchors before optimisation
+        self.final_anchors_estimate_marker_pub = rospy.Publisher("/visualization_final_anchors_estimate", MarkerArray, queue_size=10) # Visualisation for the estimate of the anchors in real time (So will display the final estimate too)
+
+
+        self.processing_queue = queue.Queue() # Queue to store the synchronised measurements
+        self.processing_thread = threading.Thread(target=self.process_queue) # Separate thread
         self.processing_thread.start()
 
 
-    # No longer used
-    def position_callback(self, msg):
-        self.current_position = (msg.pose.position.x, msg.pose.position.y, msg.pose.position.z)
-        self.current_orientation = (msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w)
-        if not self.__pose_received:
-            rospy.loginfo(f"Received drone position: {self.current_position}")
-            self.__pose_received = True
-    
-    # No longer used
-    def range_callback(self, msg):
-        
-        anchor_id = msg.ranges[0].id
-        range_measurement = msg.ranges[0].distance
-
-        rospy.loginfo("\n")
-
-        # if not self.__range_received:
-        rospy.loginfo(f"Range received: {anchor_id} - {range_measurement} - {self.current_position}")
-            # self.__range_received = True
-
-        if self.current_position is None:
-            rospy.logwarn("Drone position not received yet. Ignoring range measurement.")
-            return
-        
-        self.publish_combined_message(range_measurement, anchor_id)
-
-
-        # Comment out all this to ignore the anchor estimation and just get bags
-
-        # self.initializer.measurement_callback(self.current_position, range_measurement, anchor_id)
-
-        # rospy.loginfo(f"status: {self.initializer.anchor_measurements_dictionary[anchor_id]['status']}")
-        # rospy.loginfo(f"len(positions_pre_rough_estimate): {len(self.initializer.anchor_measurements_dictionary[anchor_id]['positions_pre_rough_estimate'])}")
-        # rospy.loginfo(f"len(distances_pre_rough_estimate): {len(self.initializer.anchor_measurements_dictionary[anchor_id]['distances_pre_rough_estimate'])}")
-        # rospy.loginfo(f"estimator_rough_linear: {self.initializer.anchor_measurements_dictionary[anchor_id]['estimator_rough_linear']}")
-
-
-        # if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "optimised_trajectory":
-        #     rospy.loginfo(f"estimator_rough_non_linear: {self.initializer.anchor_measurements_dictionary[anchor_id]['estimator_rough_non_linear']}")
-        #     rospy.loginfo("Anchor pre-initialized. Calculating optimal trajectory...")
-        #     waypoints = self.initializer.optimal_waypoints
-        #     if not self.__trajectory_published:
-        #         self.publish_waypoints(waypoints)
-        #         self.__trajectory_published = True
-
-        #         rospy.loginfo(f"Optimal waypoints: {waypoints}")
-
-        # if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "initialised":
-        #     rospy.loginfo(f"Anchor {anchor_id} initialized.")
-
-
     def synchronized_callback(self, pose_msg, uwb_msg):
-        self.current_position = (pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z)
-        self.current_orientation = (pose_msg.pose.orientation.x, pose_msg.pose.orientation.y, pose_msg.pose.orientation.z, pose_msg.pose.orientation.w)
+        # Update position and orientation
+        # self.current_position = (pose_msg.pose.position.x, pose_msg.pose.position.y, pose_msg.pose.position.z)
+        # self.current_orientation = (pose_msg.pose.orientation.x, pose_msg.pose.orientation.y, pose_msg.pose.orientation.z, pose_msg.pose.orientation.w)
 
+        self.current_position = (pose_msg.transform.translation.x, pose_msg.transform.translation.y, pose_msg.transform.translation.z)
+        self.current_orientation = (pose_msg.transform.rotation.x, pose_msg.transform.rotation.y, pose_msg.transform.rotation.z, pose_msg.transform.rotation.w)
+
+        # Retrieve the anchor ID and the measured range
         anchor_id = uwb_msg.ranges[0].id
         range_measurement = uwb_msg.ranges[0].distance
 
-        self.waypoint_checkpoint(self.current_position)
+        # Update the waypoints in the UWB online initialisation class, using the current postition
+        # self.waypoint_checkpoint(self.current_position, threshold=0.1)
 
         
 
-        # compensate for the tag to drone transformation
+        # Compensate for the tag to drone transformation
         self.current_tag_position = self.drone_to_tag_transformation(self.current_position, self.current_orientation)
 
         # rospy.loginfo(f"Synchronized Range: {anchor_id} - {range_measurement} - Position: {self.current_tag_position}")
-        rospy.loginfo(f"Printing the bounds : {self.initializer.trajectory_optimiser.bounds}")
-        # Proceed to publish the combined message
+
+        # Proceed to publish the combined message for the rosbags
         self.publish_combined_message(range_measurement, anchor_id)
 
+        # Put the new measurement in the queue
         self.processing_queue.put((self.current_tag_position, range_measurement, anchor_id))
 
+        # If the anchor status is to be save, save a csv file with all the measurements for simplicity
         if self.anchor_status[anchor_id] == "to_be_saved":
-            self.initializer.save_measurements_to_csv(anchor_id, f"/home/nvidia/dupont_cws/csv_files/run3_{anchor_id}_results.csv")
+            self.initializer.save_measurements_to_csv(anchor_id, f"/home/nvidia/dupont_cws/csv_files/run_{self.run_id}_{anchor_id}_results.csv")
             self.anchor_status[anchor_id] = "done"
-            rospy.loginfo("Published the csv file")
+            rospy.loginfo(f"Published the csv file for anchor {anchor_id}")
 
 
     def process_queue(self):
@@ -165,46 +146,120 @@ class UWBAnchorInitialisationNode:
                 # Fetch the next item from the queue
                 position, range_measurement, anchor_id = self.processing_queue.get(timeout=1)
 
-                # Call the long-running initializer function here
+                # UWB online initialisation callback function, will return other than none only if new waypoints are to be reached
                 new_tag_waypoints = self.initializer.measurement_callback(position, range_measurement, anchor_id)
 
+                # If the anchor is initialised, publish the csv
                 if self.initializer.anchor_measurements_dictionary[anchor_id]["status"] == "initialised":
                     if self.anchor_status[anchor_id] == "unseen":
                         self.anchor_status[anchor_id] = "to_be_saved"
-                rospy.loginfo(f"Processed anchor {anchor_id} with position {position} and range {range_measurement}")
 
+                # rospy.loginfo(f"Processed anchor {anchor_id} with position {position} and range {range_measurement}")
+
+                # Publish ground truth position for the anchors
                 self.publish_anchors_gt()
+
                 anchor_current_estimate = [self.initializer.anchor_measurements_dictionary[anchor_id]["estimator"][:3]]
 
+                # Publish the current estimate for where the anchor is
                 self.publish_current_anchors_estimate(anchor_current_estimate)
-                if new_tag_waypoints is not None:
-                    rospy.loginfo(f"Optimal waypoints: {new_tag_waypoints}")
+
+                # Process the optimal waypoints
+                if new_tag_waypoints is not None and self.publish_optimal_waypoints:
+
+                    rospy.loginfo(f"Received optimal waypoints for the tag: {new_tag_waypoints}")
+
+                    # Convert them to the drone frame
                     drone_waypoints = []
                     for wp in new_tag_waypoints:
                         drone_wp, _ = self.tag_to_drone_transformation(wp)
-                        rospy.loginfo(f"Waypoint: {wp}")
                         drone_waypoints.append(drone_wp)
-                        
+                    
+                    rospy.loginfo(f"Converted the optimal waypoints into drone frame: {drone_waypoints}")
+
                     self.publish_waypoints(drone_waypoints)
+
                     anchor_estimate = [self.initializer.anchor_measurements_dictionary[anchor_id]["estimator"][:3]]
+
+                    # Publish the anchor estimate for pre optimisation
                     self.publish_anchors_estimate(anchor_estimate)
                     
+                
                 self.processing_queue.task_done()  # Mark this task as done
+
             except queue.Empty:
-                rospy.loginfo("QUEUE IS EMPTY")
+                rospy.loginfo("QUEUE IS EMPTY FOR NOW")
                 continue
     
-    def waypoint_checkpoint(self, drone_position):
+
+
+
+    def waypoints_reached_callback(self, data):
+
+        def is_waypoint_in_list(waypoint, waypoint_list, tolerance=1e-1):
+            # Loop through each waypoint in the list
+            for wp in waypoint_list:
+                # Check if the waypoint matches within a given tolerance
+                if np.allclose(waypoint, wp, atol=tolerance):
+                    return True
+            return False
+
+        def remove_waypoint_once(waypoint_list, waypoint_to_remove, tolerance=1e-1):
+            for i, wp in enumerate(waypoint_list):
+                if np.allclose(wp, waypoint_to_remove, atol=tolerance):
+                    # Remove the waypoint and return the modified list
+                    del waypoint_list[i]
+                    break  # Exit after removing the first occurrence
+            return waypoint_list
+
+        waypoint_drone = [data.waypoint.x, data.waypoint.y, data.waypoint.z]
+        waypoint_tag = self.drone_to_tag_transformation(waypoint_drone)
+
+        # Check if the waypoint is in the remaining waypoints
+        
+        if is_waypoint_in_list(waypoint_tag, self.initializer.remaining_waypoints):
+            # Remove the waypoint from remaining_waypoints and add it to passed_waypoints
+            # self.initializer.remaining_waypoints.remove(waypoint_tag)
+            self.initializer.remaining_waypoints = remove_waypoint_once(self.initializer.remaining_waypoints, waypoint_tag)
+            self.initializer.passed_waypoints.append(waypoint_tag)
+            
+            rospy.loginfo(f"Waypoint {waypoint_tag} reached. {len(self.initializer.remaining_waypoints)} remaining.")
+
+            # Check if the waypoint is one of the optimal waypoints
+            if is_waypoint_in_list(waypoint_tag, self.initializer.current_optimal_waypoints):
+                # Remove it from the current optimal waypoints list
+                # self.initializer.current_optimal_waypoints.remove(waypoint_tag)
+                self.initializer.current_optimal_waypoints = remove_waypoint_once(self.initializer.current_optimal_waypoints, waypoint_tag)
+
+                rospy.loginfo(f"Optimal waypoint {waypoint_tag} reached, {len(self.initializer.current_optimal_waypoints)} remaining.")
+        else:
+            rospy.logwarn(f"Received waypoint {waypoint_drone} not found in remaining waypoints.")
+
+
+    def waypoint_checkpoint(self, drone_position, threshold=0.3):
         """Function to check if the drone is close to a waypoint and if so, update the remaining waypoints."""
 
+        # Check if there are remaining waypoints to reach
         if self.initializer.remaining_waypoints:
-            if np.linalg.norm(np.array(drone_position) - np.array(self.initializer.remaining_waypoints[0])) < 0.3:
+
+            # Check if the current position of the drone is close to the next waypoint to achieve (up to a thresh)
+            if np.linalg.norm(np.array(drone_position) - np.array(self.initializer.remaining_waypoints[0])) < threshold:
+
+                # If so, update the waypoints, by updating the passed and remaining waypoints
                 self.initializer.passed_waypoints.append(self.initializer.remaining_waypoints[0])
                 self.initializer.remaining_waypoints.pop(0)
+
+                last_waypoint = self.initializer.passed_waypoints[-1]
+
+                if last_waypoint in self.initializer.current_optimal_waypoints:
+                    self.initializer.current_optimal_waypoints.remove(last_waypoint)
+                    rospy.loginfo(f"Optimal waypoint reached, {len(self.initializer.current_optimal_waypoints)} remaining")
+                
                 rospy.loginfo(f"Waypoint reached, {len(self.initializer.remaining_waypoints)} remaining")
-                rospy.loginfo(self.initializer.remaining_waypoints)
 
     
+
+    # Utility function for the frame transformations
     def rotate_vector_by_quaternion(self, vector, quaternion):
         # Create a 4D vector from the input vector (x, y, z) with w=0 for quaternion multiplication
         vector_q = [vector[0], vector[1], vector[2], 0]
@@ -218,8 +273,7 @@ class UWBAnchorInitialisationNode:
         # Return only the rotated vector part (x, y, z)
         return rotated_vector_q[:3]
 
-
-    def drone_to_tag_transformation(self, drone_position, drone_orientation):
+    def drone_to_tag_transformation(self, drone_position, drone_orientation = [0,0,0.7071,0.7071]):
 
         tag_translation = [self.TAG_OFFSET_X, self.TAG_OFFSET_Y, self.TAG_OFFSET_Z]
 
@@ -258,6 +312,9 @@ class UWBAnchorInitialisationNode:
 
 
 
+
+
+    # Publisher functions
     def publish_combined_message(self, range_measurement, anchor_id):
         # Create a PoseWithCovarianceStamped message
         combined_msg = PoseWithCovarianceStamped()
@@ -286,8 +343,7 @@ class UWBAnchorInitialisationNode:
 
         # Publish the combined message
         self.combined_pub.publish(combined_msg)
-        rospy.loginfo("Published combined pose and UWB range message")
-
+        #rospy.loginfo("Published combined pose and UWB range message")
 
     def publish_anchors_gt(self):
         marker_array = MarkerArray()
@@ -391,8 +447,8 @@ class UWBAnchorInitialisationNode:
         pause_waypoint.x = self.current_position[0]
         pause_waypoint.y = self.current_position[1]
         pause_waypoint.z = self.current_position[2]
-        pause_waypoint.yaw = 0
-        pause_waypoint.holdtime = 20
+        pause_waypoint.yaw = 90.0
+        pause_waypoint.holdtime = 2
         waypoint_list.append(pause_waypoint)
 
         # Marker for the first waypoint (pause point)
@@ -424,7 +480,7 @@ class UWBAnchorInitialisationNode:
             waypoint_msg.x = wp[0]
             waypoint_msg.y = wp[1]
             waypoint_msg.z = wp[2]
-            waypoint_msg.yaw = 0
+            waypoint_msg.yaw = 90.0
             waypoint_msg.holdtime = 1
 
             waypoint_list.append(waypoint_msg)
@@ -463,10 +519,11 @@ class UWBAnchorInitialisationNode:
         rospy.loginfo(f"Published waypoint: {len(waypoint_list)}")
 
 
-# if __name__ == "__main__":
-#     rospy.init_node('uwb_anchor_initialization_node', anonymous=True)
-#     node = UWBAnchorInitialisationNode()
-#     rospy.spin()
+
+
+
+
+
 
 if __name__ == "__main__":
     rospy.init_node('uwb_anchor_initialization_node', anonymous=True)
